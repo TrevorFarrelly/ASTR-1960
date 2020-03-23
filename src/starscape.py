@@ -5,9 +5,10 @@ Randomly generates a starscape.
 from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
+from opensimplex import OpenSimplex
+import os
 import sys
 import time
-from opensimplex import OpenSimplex
 
 import utility as util
 
@@ -47,16 +48,17 @@ def prob_worker(vals):
                                                ((z*chunk_size[2]) + k) / feature_size[2])
     return x, y, z, chunk
 
-def probability_map():
-    print("Generating probability map (this will take a while)... 0.00%", flush=True, end=" ")
+def probability_map(seed):
     # initialize data structures
     t = time.time()
     workers = []
-    seed = np.random.randint(9223372036854775807)
+    threads = os.cpu_count() + (os.cpu_count() // 2)
+    print("Generating probability map with {:d} threads... 0.00%".format(threads), flush=True, end=" ")
+
     chunks = (np.asarray(img_size) // np.asarray(chunk_size)).astype(int)
     prob = np.zeros(img_size)
     # generate chunks in parallel
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=threads) as executor:
         # add all chunks to the thread pool
         for cx in range(chunks[0]):
             for cy in range(chunks[1]):
@@ -68,8 +70,8 @@ def probability_map():
             for w in workers:
                 if w.done():
                     cx, cy, cz, res = w.result()
-                    percent += 100 * ((cx*chunks[1]*chunks[2]) + (cy*chunks[2]) + cz) / (chunks[0]*chunks[1]*chunks[2])
-                    print("\rGenerating probability map (this will take a while)... {:.2f}%".format(percent), flush=True, end=" ")
+                    percent += 1 / (chunks[0]*chunks[1]*chunks[2])
+                    print("\rGenerating probability map with {:d} threads... {:.2f}%".format(threads, percent), flush=True, end=" ")
                     cx *= chunk_size[0]
                     cy *= chunk_size[1]
                     cz *= chunk_size[2]
@@ -165,16 +167,24 @@ def place_stars(stars):
     return space
 
 if __name__ == '__main__':
-    # np.random.seed(0)
+    # generate a random seed for the rest of computation
+    seed = np.random.randint(2**32 - 1)
+    print("Generating a new starscape. Seed", seed)
+    np.random.seed(seed)
+    # calculate a new probability map if the user requests it
     prob = np.array([])
     if len(sys.argv) > 1:
-        prob = probability_map()
+        prob = probability_map(seed)
         prob.tofile("data.raw")
+    # otherwise, load a raw data file
     else:
         prob = np.reshape(np.fromfile("data.raw"), img_size)
+    # modify probability map by the requested power
     prob = np.power(prob, 3)
     util.write_gs_img(prob, img_size, 'distribution', distance=True)
+    # determine cluster locations
     clusters = find_clusters(prob, 0.7)
     util.write_gs_img(clusters, img_size, "clusters")
+    # generate and place stars in space
     space = place_stars(generate_stars(prob, clusters, 10000))
     util.write_gs_img(space, img_size, 'stars', distance=True)
