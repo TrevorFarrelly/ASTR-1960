@@ -2,189 +2,103 @@
 Randomly generates a starscape.
 '''
 
-from concurrent.futures import ThreadPoolExecutor
-import cv2
 import numpy as np
-from opensimplex import OpenSimplex
 import os
+import random
 import sys
-import time
 
+import process as proc
 import utility as util
+import formula as f
 
-# Real life constants with arbitrary values. Values represent what I felt was the best
-# fit in the context of this simulation
-L_sun = 1.0
-R_sun = 1.0
-
+# parameters
 img_size = (32, 1024, 1024)
-feature_size = (8.0, 128.0, 128.0)
+feature_size = (64.0, 128.0, 128.0)
 chunk_size = (32, 32, 32)
 
-class Star:
-    def __init__(self, x, y, z):
-        self.x = x
-        self.y = y
-        self.z = z
-        self.cluster = 0
-    def pos(self):
-        return (self.x, self.y, self.z)
+def seed():
+    # get seed value from user
+    s = input("Enter an integer seed (default: random): ")
+    # default case
+    if s == '':
+        s = np.random.randint(2**32 - 1)
+        print("Using seed", s)
+    else:
+        s = int(s)
+    # generate a random seed for the rest of computation
+    random.seed(s)
+    np.random.seed(s)
+    return s
 
-def prob_worker(vals):
-    t = time.time()
-    # get values passed in
-    x, y, z, seed = vals
-    # seed simplex generator
-    simplex = OpenSimplex(seed)
-    # initialize data chunk
-    chunk = np.zeros(chunk_size).astype(float)
-    # iterate over chunk
-    for i in range(chunk_size[0]):
-        for j in range(chunk_size[1]):
-            for k in range(chunk_size[2]):
-                # generate data
-                chunk[i,j,k] = simplex.noise3d(((x*chunk_size[0]) + i) / feature_size[0],
-                                               ((y*chunk_size[1]) + j) / feature_size[1],
-                                               ((z*chunk_size[2]) + k) / feature_size[2])
-    return x, y, z, chunk
+def prob(s):
+    # calculate a new probability map if the user requests it
+    p = np.array([])
+    path = input("Enter file path to raw probability file (default: {:s}): ".format(os.path.join(os.path.curdir, 'output', 'prob.raw')))
+    # default case
+    if path == '':
+        path = os.path.join(os.path.curdir, 'output', 'prob.raw')
+    # attempt to load file
+    try:
+        p = np.fromfile(path)
+        p = np.reshape(p, img_size)
+        print("Using existing file")
+    # if file does not exist, generate a new starscape
+    except OSError:
+        print("File not found. Generating a new starscape.")
+        p = proc.probability_map(s, img_size)
+        p.tofile(path)
 
-def probability_map(seed):
-    # initialize data structures
-    t = time.time()
-    workers = []
-    threads = os.cpu_count() + (os.cpu_count() // 2)
-    print("Generating probability map with {:d} threads... 0.00%".format(threads), flush=True, end=" ")
+    # get stringing value from user
+    str = input("Enter a probability reduction value (default: 2): ")
+    # default case
+    if str == '':
+        str = 2
+    else:
+        str = int(str)
 
-    chunks = (np.asarray(img_size) // np.asarray(chunk_size)).astype(int)
-    prob = np.zeros(img_size)
-    # generate chunks in parallel
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        # add all chunks to the thread pool
-        for cx in range(chunks[0]):
-            for cy in range(chunks[1]):
-                for cz in range(chunks[2]):
-                    workers.append(executor.submit(prob_worker, (cx, cy, cz, seed)))
-        # wait for the chunks to complete
-        percent = 0.0
-        while len(workers) != 0:
-            for w in workers:
-                if w.done():
-                    cx, cy, cz, res = w.result()
-                    percent += 1 / (chunks[0]*chunks[1]*chunks[2])
-                    print("\rGenerating probability map with {:d} threads... {:.2f}%".format(threads, percent), flush=True, end=" ")
-                    cx *= chunk_size[0]
-                    cy *= chunk_size[1]
-                    cz *= chunk_size[2]
-                    prob[cx:cx+chunk_size[0], cy:cy+chunk_size[1], cz:cz+chunk_size[2]] = res
-                    util.write_gs_img(prob, img_size, 'distribution', distance=True)
-                    workers.remove(w)
-    # normalize distribution to be in range [0, 1]
-    prob = (prob - np.amin(prob))/np.ptp(prob)
-    print("Done. Total time: {:.2f}s".format(time.time() - t))
-    return prob
+    # modify probability map by the requested power
+    p = np.power(p, str)
+    util.write_dist_img(p, img_size, os.path.join(os.path.curdir, 'output', 'distribution'))
+    return p
 
-def find_clusters(prob, cutoff):
-    print("Selecting cluster locations...", end=" ", flush=True)
-    # determine location of clusters
-    locs = prob > cutoff
-    # initialize new image for testing
-    clusters = np.zeros(img_size)
-    id = 1
-    # iterate over image
-    for x in range(img_size[0]):
-        for y in range(img_size[1]):
-            for z in range(img_size[2]):
-                # found a cluster. Label it with the current ID, or the next ID, if necessary
-                if locs[x,y,z]:
-                    locs[x,y,z] = False
+def cluster(prob):
+    # get clustering amout
+    clusval = input("Enter cluster cutoff, in the range 0-1 (default: 0.7): ")
+    if clusval == '':
+        clusval = 0.7
+    else:
+        clusval = float(clusval)
 
-                    # generate the indices of surrounding points in a 5-unit radius
-                    neighbors = []
-                    for offx in range(-5, 6):
-                        for offy in range(-5, 6):
-                            for offz in range(-5, 6):
-                                index = (x+offx, y+offy, z+offz)
-                                # for some reason tuple comparison was failing me here.
-                                # index < img_size refused to work properly
-                                if index[0] >= 0 and index[1] >= 0 and index[2] >= 0 and index[0] < img_size[0] and index[1] < img_size[1] and index[2] < img_size[2]:
-                                    neighbors.append(index)
-                    # search neighbors for an existing cluster
-                    for point in neighbors:
-                        if clusters[point] != 0:
-                            # set current point's cluster as the neighbor's cluster
-                            clusters[x,y,z] = clusters[point]
-                            break
+    a = input("Enter the age of the universe, in billions of years (default: 13.8): ")
+    if a == '':
+        a = 13.8
+    else:
+        a = int(a)
 
-                    # if no existing clusters were found, set it to a new value
-                    if clusters[x,y,z] == 0:
-                        clusters[x,y,z] = id
-                        id += 1
-                    print("\rSelecting cluster locations... {:.2f}%".format(100 * ((x*img_size[1]*img_size[2]) + (y*img_size[1]) + z) / (img_size[0]*img_size[1]*img_size[2])), end=" ", flush=True)
+    # determine cluster locations
+    clusters, ages = proc.find_clusters(prob, clusval, a, img_size)
+    util.write_cluster_image(clusters, img_size, os.path.join(os.path.curdir, 'output', 'clusters'))
+    return clusters, ages, a
 
-    print("\rSelecting cluster locations... {:.2f}% Done".format(100.0))
-    return clusters
+def star(prob, clusters):
+    count = input("Enter the number of stars to generate (default: 15000): ")
+    if count == '':
+        count = 15000
+    else:
+        count = int(count)
 
-# step 2a. Generates stars in random locations within the probability map.
-# 'count' represents the number of stars to generate.
-def generate_stars(prob, clusters, count=5000):
-    print("Generating star locations...", end=" ", flush=True)
-    stars = set()
-    while len(stars) < count:
-        # randomly generate x, y, and z positions within the dimensions of the probability map
-        star = Star(np.random.randint(img_size[0]),
-                    np.random.randint(img_size[1]),
-                    np.random.randint(img_size[2]))
-        # randomly decide if a star forms at that location. Get a random value in the range 0-1.
-        # If less than the probability at the star's location, save it.
-        if np.random.random() < prob[star.pos()]:
-            star.cluster = clusters[star.pos()]
-            stars.add(star)
-    print("Done")
-    return stars
+    # generate stars in space
+    return proc.generate_stars(prob, clusters, count, img_size)
 
-# step 2b. Place stars in their own space. 'stars' is the set of points generated in star_locations
-def place_stars(stars):
-    print("Placing stars in space...", end=" ", flush=True)
-    space = np.zeros(img_size)
-    for star in stars:
-        val = 1.0
-        if star.cluster != 0:
-            val = 2.0
-        n = tuple(np.asarray(star.pos()) + np.asarray((0,1,0)))
-        s = tuple(np.asarray(star.pos()) + np.asarray((0,-1,0)))
-        e = tuple(np.asarray(star.pos()) + np.asarray((0,0,1)))
-        w = tuple(np.asarray(star.pos()) + np.asarray((0,0,-1)))
-        space[star.pos()] = val
-        if n[1] < space.shape[1]:
-            space[n] = val
-        if s[1] > 0:
-            space[s] = val
-        if e[2] < space.shape[2]:
-            space[e] = val
-        if w[2] > 0:
-            space[w] = val
-    print("Done")
-    return space
 
 if __name__ == '__main__':
-    # generate a random seed for the rest of computation
-    seed = np.random.randint(2**32 - 1)
-    print("Generating a new starscape. Seed", seed)
-    np.random.seed(seed)
-    # calculate a new probability map if the user requests it
-    prob = np.array([])
-    if len(sys.argv) > 1:
-        prob = probability_map(seed)
-        prob.tofile("data.raw")
-    # otherwise, load a raw data file
-    else:
-        prob = np.reshape(np.fromfile("data.raw"), img_size)
-    # modify probability map by the requested power
-    prob = np.power(prob, 3)
-    util.write_gs_img(prob, img_size, 'distribution', distance=True)
-    # determine cluster locations
-    clusters = find_clusters(prob, 0.7)
-    util.write_gs_img(clusters, img_size, "clusters")
-    # generate and place stars in space
-    space = place_stars(generate_stars(prob, clusters, 10000))
-    util.write_gs_img(space, img_size, 'stars', distance=True)
+    s = seed()
+    p = prob(s)
+    c, a, max_age = cluster(p)
+    stars = star(p, c)
+    stars = proc.age_stars(stars, a, max_age)
+
+    # draw images and generate a HR diagram
+    util.write_HR_diagram(stars, os.path.join(os.path.curdir, 'output', 'HR'))
+    util.write_star_image(stars, img_size, os.path.join(os.path.curdir, 'output', 'stars_eye'), distance=5)
+    util.write_star_image(stars, img_size, os.path.join(os.path.curdir, 'output', 'stars_hubble'), distance=1000)

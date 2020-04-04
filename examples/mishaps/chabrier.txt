@@ -1,0 +1,7 @@
+O type stars: 3
+B type stars: 5
+A type stars: 301
+F type stars: 905
+G type stars: 2628
+K type stars: 156
+M type stars: 1005
